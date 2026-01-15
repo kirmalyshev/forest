@@ -5,23 +5,35 @@ final class TerminalService {
     static let shared = TerminalService()
 
     private init() {
+        // Start with Terminal.app always available, refresh others in background
+        installedTerminals = [.terminal]
         refreshInstalledTerminals()
     }
 
     private(set) var installedTerminals: Set<Terminal> = []
 
     func refreshInstalledTerminals() {
-        var installed: Set<Terminal> = []
-        for terminal in Terminal.allCases {
-            if isTerminalInstalled(terminal) {
-                installed.insert(terminal)
+        // Run terminal detection on background thread to avoid blocking main thread
+        // and causing SwiftUI run loop issues with waitUntilExit()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var installed: Set<Terminal> = [.terminal]
+            for terminal in Terminal.allCases where terminal != .terminal {
+                if self?.checkTerminalInstalled(terminal) == true {
+                    installed.insert(terminal)
+                }
+            }
+            DispatchQueue.main.async {
+                self?.installedTerminals = installed
             }
         }
-        installedTerminals = installed
     }
 
     func isTerminalInstalled(_ terminal: Terminal) -> Bool {
-        if terminal == .terminal { return true }
+        // For synchronous checks, use cached value
+        installedTerminals.contains(terminal)
+    }
+
+    private func checkTerminalInstalled(_ terminal: Terminal) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/mdfind")
         process.arguments = ["kMDItemCFBundleIdentifier == '\(terminal.bundleId)'"]
@@ -30,8 +42,9 @@ final class TerminalService {
         process.standardError = FileHandle.nullDevice
         do {
             try process.run()
-            process.waitUntilExit()
+            // Read pipe data BEFORE waitUntilExit to avoid pipe buffer deadlock
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             return !output.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
         } catch { return false }
